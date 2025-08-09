@@ -148,8 +148,9 @@ class dff_importer:
             use_face_loops = geom.native_platform_type == dff.NativePlatformType.GC
             use_custom_normals = geom.has_normals and self.import_normals
             last_face_index = len(faces) - 1
-            vert_index = -1
             skipped_backfaces_num = 0
+            backface_vertices = {}
+            backfaces = []
 
             for fi, f in enumerate(faces):
 
@@ -157,10 +158,9 @@ class dff_importer:
                 if fi < last_face_index:
                     next_face = faces[fi + 1]
                     if set((f.a, f.b, f.c)) == set((next_face.a, next_face.b, next_face.c)):
-                        vert_index += 3
                         continue
 
-                face_vertices = (f.a, f.b, f.c)
+                vert_indices = (f.a, f.b, f.c)
 
                 try:
                     face = bm.faces.new(
@@ -173,35 +173,40 @@ class dff_importer:
                 except ValueError:
 
                     # Skip a face with less than 3 vertices
-                    if len(set(face_vertices)) < 3:
-                        vert_index += 3
+                    if len(set(vert_indices)) < 3:
                         continue
 
                     # Create backface
                     if self.create_backfaces:
-                        bm.verts.new(geom.vertices[f.a])
-                        bm.verts.new(geom.vertices[f.b])
-                        bm.verts.new(geom.vertices[f.c])
 
-                        bm.verts.ensure_lookup_table()
-                        bm.verts.index_update()
+                        face_vertices = []
+                        for vi in vert_indices:
+                            v = backface_vertices.get(vi)
+                            if v is None:
+                                v = len(bm.verts)
+                                backface_vertices[vi] = v
+                                bm.verts.new(geom.vertices[vi])
+                                bm.verts.ensure_lookup_table()
+                                bm.verts.index_update()
+                            face_vertices.append(bm.verts[v])
 
-                        face = bm.faces.new(bm.verts[-3:])
+                        face = bm.faces.new(face_vertices)
+                        backfaces.append(face)
 
                     else:
                         skipped_backfaces_num += 1
-                        vert_index += 3
                         continue
 
                 if len(mat_indices) > 0:
                     face.material_index = mat_indices[f.material]
 
+                if use_face_loops:
+                    vert_index = fi * 3
+                    vert_indices = (vert_index, vert_index + 1, vert_index + 2)
+
                 # Setting UV coordinates
                 for loop_index, loop in enumerate(face.loops):
-                    if use_face_loops:
-                        vert_index += 1
-                    else:
-                        vert_index = face_vertices[loop_index]
+                    vert_index = vert_indices[loop_index]
                     for i, layer in enumerate(geom.uv_layers):
 
                         bl_layer = uv_layers[i]
@@ -231,6 +236,17 @@ class dff_importer:
                         normals.append(geom.normals[vert_index])
 
                 face.smooth = True
+
+            if not normals and (skipped_backfaces_num or backfaces):
+                front_vertices_num = len(bm.verts) - len(backface_vertices)
+                front_verts = bm.verts[:front_vertices_num]
+                back_verts = bm.verts[front_vertices_num:]
+                bmesh.ops.remove_doubles(bm, verts=front_verts, dist=0.0001)
+                bmesh.ops.remove_doubles(bm, verts=back_verts, dist=0.0001)
+
+                bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+                for face in backfaces:
+                    face.normal_flip()
 
             bm.to_mesh(mesh)
 
